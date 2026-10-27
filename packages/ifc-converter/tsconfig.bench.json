@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "composite": true, "incremental": false },
+  "include": ["src/__bench__"],
+  "exclude": ["node_modules", "dist"]
+}
