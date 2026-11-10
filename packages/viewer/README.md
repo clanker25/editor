@@ -1,0 +1,270 @@
+# @pascal-app/viewer
+
+3D viewer component for Pascal building editor.
+
+## Installation
+
+```bash
+npm install @pascal-app/core @pascal-app/viewer @pascal-app/nodes
+```
+
+## Peer Dependencies
+
+```bash
+npm install react react-dom three @react-three/fiber @react-three/drei lucide-react zustand
+```
+
+## What's Included
+
+- **Viewer Component** - WebGPU-powered 3D viewer with camera controls
+- **Node Rendering Runtime** - Registry-driven dispatch for node renderers supplied by `@pascal-app/nodes`
+- **Post-Processing** - SSGI (ambient occlusion + global illumination), TRAA (anti-aliasing), outline effects
+- **Level System** - Level visibility and positioning (stacked/exploded/solo modes)
+- **Wall Cutout System** - Dynamic wall hiding based on camera position
+- **Asset URL Helpers** - CDN URL resolution for models and textures
+
+## Usage
+
+The live render entry rebuilds geometry from a scene graph in ordinary React applications,
+including Vite. It requires neither Next.js, Tailwind, nor `@pascal-app/editor`.
+
+```tsx
+import { acquireSceneReadOnlyLease, loadPlugin, useScene } from '@pascal-app/core'
+import { renderPlugin } from '@pascal-app/nodes/render'
+import { configureViewer, Viewer } from '@pascal-app/viewer'
+import { OrbitControls } from '@react-three/drei'
+import scene from './scene.json'
+
+configureViewer({
+  assetsBaseUrl: 'https://editor.pascal.app',
+  storageUrl: 'https://your-storage.example',
+  // Optional self-hosted decoder directories (include the trailing slash):
+  // decoders: { dracoPath: '/decoders/draco/', basisPath: '/decoders/basis/' },
+})
+await loadPlugin(renderPlugin)
+const releaseReadOnly = acquireSceneReadOnlyLease()
+useScene.getState().setScene(scene.nodes, scene.rootNodeIds, {
+  materials: scene.materials,
+  collections: scene.collections,
+  installedPlugins: scene.installedPlugins,
+})
+
+function App() {
+  return (
+    <div style={{ width: '100vw', height: '100vh' }}>
+      <Viewer>
+        <OrbitControls makeDefault target={[0, 1, 0]} />
+      </Viewer>
+    </div>
+  )
+}
+
+// On teardown, unmount App before releasing the lease:
+// releaseReadOnly()
+```
+
+Load exactly one built-in plugin per runtime: `renderPlugin` for a viewer, or the full
+`builtinPlugin` from `@pascal-app/nodes` for an editor. Without registration, nodes cannot render.
+The read-only lease suppresses document-writing systems while the live geometry systems rebuild
+from the supplied graph. Keep it until the viewer unmounts.
+
+**One active scene per page/package instance.** `useScene`, `useViewer`, the node registry,
+`sceneRegistry`, loader caches and viewer systems are shared singletons. Concurrent viewers cannot
+own independent graphs. Unmount the previous viewer and release its read-only lease and host
+subscriptions before switching projects; hydrate the new graph and reset the host's viewer
+selection/project presentation before remounting. Use a separate page/iframe for independent graphs.
+
+`configureViewer` resolves asset and storage origins at call time. Without configuration, assets
+use `https://editor.pascal.app`, with the existing `NEXT_PUBLIC_ASSETS_CDN_URL` and
+`NEXT_PUBLIC_SUPABASE_URL` environments used when available. Next hosts should pass those values
+explicitly at bootstrap. Draco defaults to version 1.5.5 and Basis to the Three.js 0.187.0
+transcoder. Configure before loading assets: changing paths does not unload cached models or
+already initialized decoder workers. KTX2 support is detected per renderer and misaligned textures
+retain the RGBA fallback. Denied browser storage disables preference persistence without blocking
+rendering.
+
+See [`fixtures/viewer-live`](../../fixtures/viewer-live) for a complete small graph and the
+isolated packed-package dev/production smoke test.
+
+## Custom Camera Controls
+
+```typescript
+import { Viewer } from '@pascal-app/viewer'
+import { CameraControls } from '@react-three/drei'
+
+function App() {
+  return (
+    <Viewer selectionManager="custom">
+      <CameraControls />
+    </Viewer>
+  )
+}
+```
+
+## 2D and Split-View Embeds
+
+`@pascal-app/viewer` owns the 3D canvas. The npm-facing multi-view shell lives in
+`@pascal-app/editor`, where it can compose that canvas with the read-only SVG floor plan without
+coupling editor-only floor-plan state into the viewer runtime.
+
+Use `modes` to expose any combination of `3d`, `2d`, and `split`. A single enabled mode hides the
+switcher automatically. `mode` and `onModeChange` can be supplied for controlled embeds; otherwise
+`defaultMode` is used.
+
+```tsx
+import { ViewerStage, useViewerCameraNavigationSync } from '@pascal-app/editor'
+import { Viewer } from '@pascal-app/viewer'
+import { CameraControls, type CameraControlsImpl } from '@react-three/drei'
+import { useRef } from 'react'
+
+function SyncedCameraControls() {
+  const controls = useRef<CameraControlsImpl>(null)
+  const publishCameraPose = useViewerCameraNavigationSync(controls)
+
+  return <CameraControls makeDefault onUpdate={publishCameraPose} ref={controls} />
+}
+
+function EmbeddedViewer() {
+  return (
+    <div style={{ width: 960, height: 640 }}>
+      <ViewerStage defaultMode="3d" modes={['3d', '2d']}>
+        <Viewer>
+          <SyncedCameraControls />
+        </Viewer>
+      </ViewerStage>
+    </div>
+  )
+}
+```
+
+Common configurations:
+
+```tsx
+<ViewerStage modes={['3d']}>{viewer}</ViewerStage>
+<ViewerStage modes={['2d']} />
+<ViewerStage modes={['3d', '2d']}>{viewer}</ViewerStage>
+<ViewerStage modes={['3d', 'split']}>{viewer}</ViewerStage>
+<ViewerStage modes={['3d', '2d', 'split']}>{viewer}</ViewerStage>
+```
+
+For a 2D-only embed, no 3D canvas is mounted. When 3D or split is enabled, the 3D canvas stays
+mounted while 2D is active, avoiding renderer reinitialization. Camera poses,
+floor-plan pan/zoom/rotation, and the compass synchronize through transient subscriptions; live
+navigation does not require a React render per frame. Set `showCompass={false}` or
+`showSwitcher={false}` when the host supplies its own controls.
+
+## Capture Sessions
+
+`@pascal-app/viewer/capture` holds the optional capture runtime and its reference layers. Mount
+`CaptureRuntime` as a child of `Viewer` and provide a source resolver. The host owns access control
+and transport; the runtime owns source lifecycle, scan-node placement, layer visibility, and
+reference renderers for RoomPlan models, device trajectories, and PLY/live point clouds. The
+session contracts it consumes live in `@pascal-app/core/capture`.
+
+```tsx
+import { createHttpCaptureSource } from '@pascal-app/core/capture'
+import { Viewer } from '@pascal-app/viewer'
+import { CaptureRuntime } from '@pascal-app/viewer/capture'
+
+function CaptureViewer() {
+  return (
+    <Viewer>
+      <CaptureRuntime
+        onError={(error, context) => reportCaptureError(error, context)}
+        resolveSource={(locator) => createHttpCaptureSource(locator, { credentials: 'include' })}
+        retryKey={retryVersion}
+      />
+    </Viewer>
+  )
+}
+```
+
+Unknown streams remain in the descriptor and can be rendered by passing a custom renderer keyed by
+stream role or kind. A live transport implements `CaptureSource.subscribe()`; no particular
+WebSocket, WebRTC, or collaboration backend is required.
+
+`CaptureRuntime` keeps telemetry host-neutral: pass `onError` to report source or per-stream
+failures in the host, then increment `retryKey` to reload every affected session. Direct
+`useCaptureSource()` consumers can call its `retry()` function instead.
+
+Hosts can pass `defaultLayerVisibility` to keep expensive optional layers disabled until a user
+enables them. Persisted values in the scan node's `layers` map always override those host defaults;
+without host defaults, every available layer remains visible for backwards compatibility. Hidden
+sessions and layers are unmounted rather than only made visually transparent, so they stop
+raycasting, artifact work, animation, and live packet subscriptions while disabled.
+
+### Local surface previews
+
+`@pascal-app/viewer/capture/preview` exports `createSurfaceMeshGeometry` and `createClayMatcap`
+without importing the React viewer runtime, so a capture client can render a locally saved surface
+immediately, before its archive is uploaded. The geometry decoder uses the shared
+`@pascal-app/core/capture` validator, including the native 20,000-face budget, byte lengths, and
+index bounds. It returns `null` for invalid input. The host owns the returned geometry and matcap
+texture and must dispose them on teardown.
+
+Direct `CaptureStreamLayer` consumers can pass
+`meshPresentation={{ previewMaterial: 'clay', dollhouse: true }}`. Clay replaces preliminary vertex
+colors; dollhouse enables front-face rendering for surface previews and room models, revealing
+inward-facing room surfaces from outside. It changes per-instance materials, not geometry or
+loader-cached materials. Omitting these options preserves the existing presentation.
+
+## Scene Snapshots
+
+`createSnapshotPipeline` renders offscreen snapshots with the scene theme's backdrop by default.
+Inside a `Viewer`, pass the source returned by `useSceneAtmosphere()` as `atmosphere` to capture
+the active presentation's sky instead. Recreate the pipeline when that source changes; updates
+to its existing uniforms do not require rebuilding it.
+
+Use `applyEnvironment({ ..., transparent: true })` to retain scene alpha without compositing a
+backdrop. The snapshot scene pass owns its transparent clear so intermediate post-processing
+passes cannot turn empty sky into opaque pixels. Dispose the pipeline when it is replaced or
+no longer needed.
+
+## Viewer State
+
+```typescript
+import { useViewer } from '@pascal-app/viewer'
+
+function ViewerControls() {
+  const levelMode = useViewer(s => s.levelMode)
+  const setLevelMode = useViewer(s => s.setLevelMode)
+  const wallMode = useViewer(s => s.wallMode)
+  const setWallMode = useViewer(s => s.setWallMode)
+
+  return (
+    <div>
+      <button onClick={() => setLevelMode('stacked')}>Stacked</button>
+      <button onClick={() => setLevelMode('exploded')}>Exploded</button>
+      <button onClick={() => setWallMode('cutaway')}>Cutaway</button>
+      <button onClick={() => setWallMode('up')}>Full Height</button>
+    </div>
+  )
+}
+```
+
+## Asset CDN Helpers
+
+```typescript
+import { resolveCdnUrl } from '@pascal-app/viewer'
+
+// Resolves relative paths to CDN URLs
+const url = resolveCdnUrl('/items/chair/model.glb')
+// → 'https://editor.pascal.app/items/chair/model.glb'
+
+// Handles external URLs and asset:// protocol
+const externalUrl = resolveCdnUrl('https://example.com/model.glb')
+// → 'https://example.com/model.glb' (unchanged)
+```
+
+## Features
+
+- **WebGPU Rendering** - Hardware-accelerated rendering via Three.js WebGPU
+- **Post-Processing** - SSGI for realistic lighting, outline effects for selection
+- **Level Modes** - Stacked, exploded, or solo level display
+- **Wall Cutaway** - Automatic wall hiding for interior views
+- **Camera Modes** - Perspective and orthographic projection
+- **Scan/Guide Support** - 3D scans and 2D guide images
+
+## License
+
+MIT
